@@ -1,0 +1,819 @@
+---
+title: "Correlates of driving under the influence of cannabis"
+subtitle: "Latent Class Analysis"
+author: "Anna"
+date: "2024-05-25"
+output: 
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+options(warn = -1)
+```
+
+# Setup
+```{r essentials}
+# clean workspace
+rm(list=ls())
+packages <- c("data.table", "readxl", "tidyverse", "ggplot2", "poLCA", "reshape2", "vcd", "tidyLPA", "export") 
+
+# Install packages not yet installed
+installed_packages <- packages %in% rownames(installed.packages())
+if (any(installed_packages == FALSE)) {
+  install.packages(packages[!installed_packages])
+}
+# Load packages
+invisible(lapply(packages, library, character.only = TRUE))
+
+# current date:
+DATE <- format(Sys.Date(), "%Y%m%d")
+
+# themes and options
+options(scipen = 999)
+
+# output folders
+folder_table <- file.path("..", "..", "tables", "LCA")
+folder_plot <- file.path("..", "..", "figures", "LCA")
+
+if (!file.exists(folder_table)) {
+  dir.create(folder_table, recursive = TRUE)
+}
+
+if (!file.exists(folder_plot)) {
+  dir.create(folder_plot, recursive = TRUE)
+}
+```
+
+# Data Import
+```{r data_import}
+# define paths
+path_DE_reg <- file.path("..", "..", "Data", "regular_users_GER_cleaned_v03_20240731.rds") #at least monthly users in GER
+path_PLZ <- file.path("..", "..", "Data", "plz and urban.rds") #PLZ and urbanization level
+
+# read data
+data_raw <- data.table(readRDS(file = path_DE_reg))
+data_PLZ <- data.table(readRDS(file = path_PLZ))
+```
+
+
+# Data Preparation
+
+## Selection of Variables relevant for LCA
+```{r select_vars}
+data_sel <- data_raw %>% 
+  dplyr::select("i_NUMBER", "PLZ", "Bundesland", "agegroup", "age_in_years", "sex", "edu_group", "prescription", "CAST_score_full", "BSSS_total", "DISTRESS_total", "speeding_total", "DUIC.INTOX", "DUIA", "DUIC.PEERS", "LEGAL.01", "DUICDUIA.PERCRISK.1", "DUICDUIA.PERCRISK.2", "DUICDUIA.PERCRISK.3", "DUICDUIA.PERCRISK.4", "medic_withprescr_only", "DRIVERLICENSE")
+
+data_PLZ <- data_PLZ %>% dplyr::rename(PLZ = plz)
+
+data_sel <- data_sel %>% filter(DRIVERLICENSE == "ja") #only participants who have a driver's license
+
+```
+
+## PLZ matchen, um Urbanisierungsgrad zu bestimmen
+```{r match_plz}
+
+data_sel <- merge(data_sel, data_PLZ, by = "PLZ", all.x = TRUE)
+
+data_sel <- data_sel %>% mutate(urb_lab_en = case_when(
+  PLZ == "" & Bundesland %in% c("HB", "HH", "BE") ~ "metropolis",
+  TRUE ~ urb_lab_en),
+  # dichotomize urbanization level into rural and urban
+  urb_lab_en_bin = factor(case_when(
+    urb_lab_en %in% c("metropolis", "large city") ~ 2,
+    urb_lab_en %in% c("medium-sized city", "urban space", "small town/village area") ~ 1,
+    TRUE ~ NA_real_),
+    levels = c(1, 2),
+    labels = c("rural", "urban")))
+```
+
+### Distribution of Urbanization Level
+```{r urban_dist}
+prop.table(table(data_sel$urb_lab_en))
+table(data_sel$urb_lab_en)
+
+#how many NAs in urb_lab_en?
+table(is.na(data_sel$urb_lab_en), data_sel$DUIC.INTOX) # 15 NAs (7 without DUIC, 8 with DUIC)
+```
+
+## Tranformation of Variables into Binary Factors
+
+Variables should be binary factors with levels 1 and 2 for the LCA model.
+
+```{r data_prep}
+data <- data_sel %>%
+  mutate(
+    CUD_CAST = factor(case_when(
+      CAST_score_full >= 7 ~ 2,
+      CAST_score_full < 7 ~ 1,
+      TRUE ~ NA_real_),
+      levels = c(1, 2),
+      labels = c("low", "high")),
+    medic_withprescr_only = factor(case_when(
+      medic_withprescr_only == 1 ~ 2,
+      medic_withprescr_only == 0 ~ 1,
+      TRUE ~ NA_real_),
+      levels = c(1, 2),
+      labels = c("no", "yes")),
+    mental_illness = factor(case_when(
+      DISTRESS_total > 12 ~ 2,
+      DISTRESS_total <= 12 ~ 1,
+      TRUE ~ NA_real_),
+      levels = c(1, 2),
+      labels = c("no", "yes")),
+    LEGALPROBL = factor(case_when(
+      LEGAL.01 == "ja" ~ 2,
+      LEGAL.01 == "nein" ~ 1,
+      TRUE ~ NA_real_),
+      levels = c(1, 2),
+      labels = c("no", "yes")),
+    DUIA12m = factor(case_when(
+      DUIA %in% c("in den letzten 30T", "in den letzten 12M") ~ 2,
+      DUIA %in% c("nie", "länger als 12M her") ~ 1,
+      is.na(DUIA) ~ 1, #NA = does not drink alcohol -> cannot drive a car while intoxicated
+      TRUE ~ NA_real_), 
+      levels = c(1, 2),
+      labels = c("no", "yes")),
+    DUICPEERS12m = factor(case_when(
+      DUIC.PEERS %in% c("in den letzten 30T", "in den letzten 12M") ~ 2,
+      DUIC.PEERS %in% c("nie", "länger als 12M her") ~ 1,
+      TRUE ~ NA_real_),
+      levels = c(1, 2),
+      labels = c("no", "yes")),
+    DUICINTOX12m = factor(case_when(
+      DUIC.INTOX %in% c("in den letzten 30T", "in den letzten 12M") ~ 2,
+      DUIC.INTOX %in% c("nie", "länger als 12M her") ~ 1,
+      TRUE ~ NA_real_),
+      levels = c(1, 2),
+      labels = c("no", "yes")),
+    PERCRISK_DUICmod_bin = factor(case_when(
+      DUICDUIA.PERCRISK.1 %in% c("ungefährlich", "nicht so gefährlich") ~ 2,
+      DUICDUIA.PERCRISK.1 %in% c("gefährlich", "sehr gefährlich") ~ 1,
+      TRUE ~ NA_real_),
+      levels = c(1, 2),
+      labels = c("high risk perc", "low risk perc")),
+    PERCRISK_DUIAmod_bin = factor(case_when(
+      DUICDUIA.PERCRISK.2 %in% c("ungefährlich", "nicht so gefährlich") ~ 2,
+      DUICDUIA.PERCRISK.2 %in% c("gefährlich", "sehr gefährlich") ~ 1,
+      TRUE ~ NA_real_),
+      levels = c(1, 2),
+      labels = c("high risk perc", "low risk perc")))
+    
+```
+
+## MEDIAN SPLIT to dichotomize continuous variables
+
+### Brief Sensation Seeking Scale (BSSS)
+```{r dichotomize_bsss}
+#subtract -1 from BSSS_total, so the scale starts at 0 (to be consistent with the other scales)
+data <- data %>% mutate(BSSS_total = BSSS_total - 1)
+
+summary(data$BSSS_total) #median = 2.125
+sum(is.na(data$BSSS_total)) #0 NAs
+
+data <- data %>% 
+  mutate(BSSS_binary = factor(case_when(
+    BSSS_total <= median(BSSS_total) ~ 1,
+    BSSS_total > median(BSSS_total) ~ 2,
+    TRUE ~ NA_real_),
+    levels = c(1, 2),
+    labels = c("low", "high")))
+
+table(data$BSSS_binary)
+```
+
+### Speeding
+```{r dichotomize_speeding}
+# subtract -1 from speeding_total, so the scale starts at 0 (to be consistent with the other scales)
+data <- data %>% mutate(speeding_total = speeding_total - 1)
+
+summary(data$speeding_total) #median = 1.5, 27 NAs
+median_speeding_total <- median(data$speeding_total, na.rm = TRUE)
+
+data <- data %>% 
+  mutate(speeding_binary = factor(case_when(
+    speeding_total <= median_speeding_total ~ 1,
+    speeding_total > median_speeding_total ~ 2,
+    TRUE ~ NA_real_),
+    levels = c(1, 2),
+    labels = c("low", "high")))
+table(data$speeding_binary)
+table(data$speeding_total)
+```
+
+
+
+## Description of the Sample
+
+### Sociodemographic Variables (Covariates)
+```{r descriptives_demo}
+
+#randomly assign sex == "divers" to "male" or "female"
+divers_indices <- which(data$sex == "divers")
+n_divers <- length(divers_indices)
+set.seed(42)
+new_values <- sample(c("weiblich", "männlich"), n_divers, replace = TRUE)
+data$sex[divers_indices] <- new_values
+data$sex <- factor(data$sex, levels = c("männlich", "weiblich"))
+
+
+prop.table(table(data$urb_lab_en_bin, useNA = "ifany"))
+prop.table(table(data$sex, useNA = "ifany"))
+prop.table(table(data$edu_group, useNA = "ifany"))
+prop.table(table(data$agegroup, useNA = "ifany"))
+
+summary(data$age_in_years)
+sd(data$age_in_years)
+
+cat("missings in all covariates")
+sum(is.na(data$sex) | is.na(data$agegroup) | is.na(data$edu_group) | is.na(data$urb_lab_en_bin))
+
+``` 
+
+### Indicators
+```{r descriptives}
+ind_vars <- c("DUIA12m", "DUICINTOX12m", "CUD_CAST", "mental_illness", "medic_withprescr_only", "LEGALPROBL", "DUICPEERS12m", "BSSS_binary", "speeding_binary", "PERCRISK_DUICmod_bin", "PERCRISK_DUIAmod_bin")
+
+ for (var in ind_vars) {
+   cat("Variable: ", var, "\n")
+   print(prop.table(table(data[[var]], useNA = "ifany")))
+   cat("\n\n")
+ }
+
+#CAST
+dist_CAST <- ggplot(data, aes(x = CAST_score_full, fill = CUD_CAST)) +
+  geom_histogram(bins = 20) +
+  labs(x = "Cannabis Abuse Screening Test - Score", y = "Count", fill = "CUD risk") +
+  scale_x_continuous(breaks = seq(0, 24, by = 2, limits = c(0, 24))) +
+  theme_minimal()
+
+#PERCRISK_DUICmod_bin
+data <- data %>% mutate(DUICDUIA.PERCRISK.1 = factor(DUICDUIA.PERCRISK.1, levels = c("ungefährlich", "nicht so gefährlich", "gefährlich", "sehr gefährlich", "weiß nicht"), labels = c("not dangerous", "not so dangerous", "dangerous", "very dangerous", "don't know")))
+
+dist_PercRiskDUIC <- ggplot(data, aes(x = DUICDUIA.PERCRISK.1, fill = PERCRISK_DUICmod_bin)) +
+  geom_bar() +
+  labs(x = "How dangerous do you think it is\nto take 1-2 puffs on a joint before driving?", y = "Count", fill = "Dichotomized\nRisk\nPerception\nDUIC") +
+  scale_fill_discrete(labels = c("high risk perc" = "High", "low risk perc" = "Low")) +
+  scale_x_discrete(labels = c("not dangerous" = "Not\ndangerous", "not so dangerous" = "Not so\ndangerous", "dangerous" = "Dangerous", "very dangerous" = "Very\ndangerous", "don't\nknow" = "Don't know")) +
+  theme_minimal()
+
+#PERCRISK_DUIAmod_bin
+data <- data %>% mutate(DUICDUIA.PERCRISK.2 = factor(DUICDUIA.PERCRISK.2, levels = c("ungefährlich", "nicht so gefährlich", "gefährlich", "sehr gefährlich", "weiß nicht"), labels = c("not dangerous", "not so dangerous", "dangerous", "very dangerous", "don't know")))
+
+dist_PercRiskDUIA <- ggplot(data, aes(x = DUICDUIA.PERCRISK.2, fill = PERCRISK_DUIAmod_bin)) +
+  geom_bar() +
+  labs(x = "How dangerous do you think it is\nto drink a little more than is allowed before driving?", y = "Count", fill = "Dichotomized\nRisk\nPerception\nDUIA") +
+  scale_fill_discrete(labels = c("high risk perc" = "High", "low risk perc" = "Low")) +
+  scale_x_discrete(labels = c("not dangerous" = "Not\ndangerous", "not so dangerous" = "Not so\ndangerous", "dangerous" = "Dangerous", "very dangerous" = "Very\ndangerous", "don't\nknow" = "Don't know")) +
+  theme_minimal()
+
+#BSSS
+dist_BSSS <- ggplot(data, aes(x = BSSS_total, fill = BSSS_binary)) +
+  geom_histogram(bins = 20) +
+  #vertical line at median
+  geom_vline(xintercept = median(data$BSSS_total), linetype = "dashed", color = "red", linewidth = 1) +
+  labs(x = "Brief Sensation Seeking Scale - Score", y = "Count", fill = "Dichotomized\nSensation\nSeeking") +
+  theme_minimal()
+
+#speeding
+dist_speed <- ggplot(data, aes(x = speeding_total, fill = speeding_binary)) +
+  geom_histogram(bins = 20) +
+  #vertical line at median
+  geom_vline(xintercept = median_speeding_total, linetype = "dashed", color = "red", linewidth = 1) +
+  labs(x = "Speeding Scale - Score", y = "Count", fill = "Dichotomized\nSpeeding") +
+  theme_minimal()
+
+#mental illness
+dist_mentalillness <- ggplot(data, aes(x = DISTRESS_total, fill = mental_illness)) +
+  geom_histogram(bins = 20) +
+  labs(x = "Kessler Psychological Distress Scale - Score", y = "Count", fill = "Mental Illness") +
+  theme_minimal()
+
+#save plots with graph2doc
+graph2doc(x = dist_CAST, file = file.path(folder_plot, "dist_CAST.png"), width = 6, height = 4)
+graph2doc(x = dist_PercRiskDUIC, file = file.path(folder_plot, "dist_PercRiskDUIC.png"), width = 6, height = 4)
+graph2doc(x = dist_PercRiskDUIA, file = file.path(folder_plot, "dist_PercRiskDUIA.png"), width = 6, height = 4)
+graph2doc(x = dist_BSSS, file = file.path(folder_plot, "dist_BSSS.png"), width = 6, height = 4)
+graph2doc(x = dist_speed, file = file.path(folder_plot, "dist_speed.png"), width = 6, height = 4)
+graph2doc(x = dist_mentalillness, file = file.path(folder_plot, "dist_mentalillness.png"), width = 6, height = 4)
+```
+
+# Correlations between Variables (Cramers V)
+
+```{r check correlations}
+
+all_vars <- c("DUIA12m", "DUICINTOX12m", "CUD_CAST", "mental_illness", "medic_withprescr_only", "LEGALPROBL", "DUICPEERS12m", "BSSS_binary", "speeding_binary", "PERCRISK_DUICmod_bin", "PERCRISK_DUIAmod_bin", "urb_lab_en_bin", "edu_group", "sex", "agegroup")
+
+# function to calculate Cramers V
+catcorrm <- function(vars, dat) {
+  if (!all(vars %in% colnames(dat))) stop("some variables are not in the data frame")
+  n <- length(vars)
+  cramer_matrix <- matrix(NA, nrow = n, ncol = n, dimnames = list(vars, vars))
+
+  for (i in seq_along(vars)) {
+    for (j in seq_along(vars)) {
+      table_data <- table(dat[[vars[i]]], dat[[vars[j]]])
+      cramer_matrix[i, j] <- assocstats(table_data)$cramer
+    }
+  }
+  
+  return(cramer_matrix)
+}
+
+# call function
+cramers_v_matrix <- catcorrm(all_vars, as.data.frame(data))
+cramers_v_df <- as.data.frame(as.table(cramers_v_matrix)) %>%
+  rename(CramersV = Freq)
+
+cramers_v_df
+```
+
+
+# Fit LCA Modell
+
+```{r fit LCA model}
+
+# model with covariates
+f_with_cov <- with(data, cbind(DUICINTOX12m, DUIA12m, DUICPEERS12m, medic_withprescr_only, mental_illness, BSSS_binary, LEGALPROBL, CUD_CAST, PERCRISK_DUICmod_bin, PERCRISK_DUIAmod_bin, speeding_binary) ~ sex + agegroup + edu_group + urb_lab_en_bin)
+
+# model without covariates
+f <- with(data, cbind(DUICINTOX12m, DUIA12m, DUICPEERS12m, medic_withprescr_only, mental_illness, BSSS_binary, LEGALPROBL, CUD_CAST, PERCRISK_DUICmod_bin, PERCRISK_DUIAmod_bin, speeding_binary) ~ 1)
+
+
+
+fit_lca_models <- function(data, formula, max_groups, nrep = 20, maxiter = 4000) {
+  set.seed(12345)
+  
+  # Initialize a dataframe to store the results
+  results <- data.frame(Model = integer(max_groups),
+                        log_likelihood = numeric(max_groups),
+                        resid_df = integer(max_groups),
+                        BIC = numeric(max_groups),
+                        AIC = numeric(max_groups),
+                        likelihood_ratio = numeric(max_groups),
+                        stringsAsFactors = FALSE)
+  
+  models <- list()
+  min_bic <- 100000  # Initial value for the minimum BIC
+  best_lca_model <- NULL
+  
+  # Loop to fit models with different numbers of classes
+  for (i in 1:max_groups) {
+    cat(sprintf("Fitting LCA model with %d classes...\n", i))
+    
+    tryCatch({
+      # fit the LCA model
+      lc <- poLCA(formula, data, nclass = i, na.rm = FALSE, nrep = nrep, maxiter = maxiter)
+      
+      # save the model fit statistics
+      results[i, 1:6] <- c(i, lc$llik, lc$resid.df, lc$bic, lc$aic, lc$Gsq)
+      
+      # save the model in the list
+      models[[i]] <- lc
+      
+      # update the best model based on the BIC value
+      if (lc$bic < min_bic) {
+        min_bic <- lc$bic
+        best_lca_model <- lc
+      }
+    }, error = function(e) {
+      # error handling in case model fitting fails
+      print(paste("Error in model with", i, "classes"))
+      results[i, ] <- c(i, NA, NA, NA, NA, NA)
+    })
+  }
+  
+  # return the results and the best model
+  return(list(results = results, best_model = best_lca_model, models = models))
+}
+
+# fit models
+lca_results <- fit_lca_models(data, f_with_cov, max_groups = 5)
+lca_results_wo_cov <- fit_lca_models(data, f, max_groups = 5)
+
+print(lca_results$results)
+print(lca_results_wo_cov$results)
+```
+
+```{r optional: rerun best model to define class order}
+# Reorder classes if needed
+reorder_classes_if_needed <- function(lca_results, f_with_cov, data) {
+  classprobs <- lca_results$best_model$P
+  sorted_classprobs <- sort(classprobs, decreasing = TRUE)
+  #check if classes are ordered correctly (i.e. in descending order of class size)
+  if (all(classprobs == sorted_classprobs)) {
+    print("Classes are ordered correctly")
+    return(lca_results$best_model)
+  } else {
+    print("Classes are not ordered correctly")
+    print("Reordering classes...")
+    
+    #rerun the best model in order to define the ordering of the classes depending on their size (the biggest class should be class 1,
+    # so it defines the reference class in the latent class regression) 
+    probs.start <- lca_results$best_model$probs.start
+    lc_rerun <- poLCA(f_with_cov, data, nclass = 3, probs.start = probs.start, graphs = TRUE, na.rm = FALSE, maxiter = 4000)
+    
+    #reorder classes (INSERT desired order of classes)
+    new.probs.start <- poLCA.reorder(probs.start, c(1, 3, 2))
+    
+    lc_rerun_2 <- poLCA(f_with_cov, data, nclass = 3, probs.start = new.probs.start, graphs = TRUE, na.rm = FALSE, maxiter = 4000)
+    return(lc_rerun_2)
+  }
+}
+
+lca_results_reordered <- reorder_classes_if_needed(lca_results, f_with_cov, data)
+lca_results_wo_cov_reordered <- reorder_classes_if_needed(lca_results_wo_cov, f, data)
+```
+
+# Estimated class population shares
+```{r class_shares}  
+bestmodel <- lca_results_reordered
+
+classprobs <- bestmodel$P #same as round(colMeans(bestmodel$posterior)*100,2)
+class_se <- bestmodel$P.se
+
+# Calculate confidence intervals for class population shares
+ci_multiplier <- 1.96  # Z-value for 95% confidence interval
+ci_lower <- classprobs - ci_multiplier * class_se
+ci_upper <- classprobs + ci_multiplier * class_se
+
+# Create a data frame to store class shares and confidence intervals
+class_shares <- data.frame(
+  class = seq_along(classprobs),  # Generates a sequence from 1 to number of classes
+  share = classprobs,
+  ci_lo = ci_lower,
+  ci_up = ci_upper
+)
+```
+
+# Predicted Class Membership (by model posterior probabilities)
+```{r pred_class}
+table(bestmodel$predclass)
+prop.table(table(bestmodel$predclass))
+```
+
+
+# Profile Plot of best fitting LCA model (with covariates)
+```{r profile plot}
+# constants
+class_levels <- c("1", "2", "3")
+shape_values <- c("1" = 16, "2" = 17, "3" = 18)
+color_values <- c("1" = "#1f77b4", "2" = "#ff7f0e", "3" = "#2ca02c")
+linetype_values <- c("1" = "solid", "2" = "longdash", "3" = "dotted")
+x_levels <- c("DUIA12m", "DUICINTOX12m", "CUD_CAST", "medic_withprescr_only", "LEGALPROBL", "DUICPEERS12m", "PERCRISK_DUIAmod_bin", "PERCRISK_DUICmod_bin", "speeding_binary", "BSSS_binary", "mental_illness")
+label_mapping <- c(
+  "DUIA12m" = "DUIA", 
+  "DUICINTOX12m" = "DUIC",
+  "CUD_CAST" = "CUD\nrisk",
+  "medic_withprescr_only" = "Medical\nuse",
+  "LEGALPROBL" = "Legal\nproblems",      
+  "DUICPEERS12m" = "DUIC\npeers",          
+  "PERCRISK_DUIAmod_bin" = "Low risk\nperception\nDUIA",
+  "PERCRISK_DUICmod_bin" = "Low risk\nperception\nDUIC",
+  "speeding_binary" = "Speeding", 
+  "BSSS_binary" = "Sensation\nSeeking",     
+  "mental_illness" = "Mental\nillness"
+)
+
+
+# data preparation for plotting
+lcaModelProbs <- reshape2::melt(bestmodel$probs, level = 1) %>%
+  rename(class = Var1) %>%
+  mutate(class = str_extract(class, "\\d+"),
+         class = factor(class, levels = class_levels))
+
+# add standard errors
+probs_se_melted <- melt(bestmodel$probs.se, level = 1) %>%
+  rename(value_se = value, class = Var1) %>%
+  dplyr::select(-Var2) %>%
+  mutate(value_se = round(value_se, digits = 10)) %>%
+  distinct() %>%
+  mutate(class = factor(class, levels = class_levels))
+
+# add confidence intervals
+lcaModelProbs <- left_join(lcaModelProbs, probs_se_melted, by = c("class", "L1")) %>%
+  mutate(CI_lower = pmax(value - 1.96 * value_se, 0), # CI cannot be negative
+         CI_upper = pmin(value + 1.96 * value_se, 1) # CI cannot be > 1
+  )
+
+# which variable manifestation probabilities to plot
+lcaModelProbs_plotting <- lcaModelProbs %>% filter(Var2 %in% c("high", "yes", "low risk perc"))
+
+
+# size of the classes in percent
+class_shares <- sprintf("%.1f%%", bestmodel$P * 100)
+label_values <- c(
+  "1" = paste("Class 1\n", "(", class_shares[1], ")", "\n", sep = ""),
+  "2" = paste("Class 2\n", "(", class_shares[2], ")", "\n", sep = ""),
+  "3" = paste("Class 3\n", "(", class_shares[3], ")", "\n", sep = "")
+)
+
+# generate plot
+LCA_profile_plot <- ggplot(lcaModelProbs_plotting, aes(x = L1, y = value, group = class, 
+                                                       color = class, linetype = class)) +
+    geom_point() +
+    geom_line(linewidth=1) +
+    geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), width = 0.2, alpha = 0.55, linewidth = 0.72, linetype = "solid") +
+    theme_minimal() +
+    theme(
+      axis.text.x = element_text(hjust = 0.5, vjust = 1),
+      axis.text.y = element_text(size = 12),              
+      axis.title.x = element_text(size = 14),          
+      axis.title.y = element_text(size = 14),            
+      plot.title = element_text(hjust = 0.5, size = 16), 
+      legend.text = element_text(size = 12),             
+      legend.title = element_text(size = 14),
+      legend.position = "bottom",
+      panel.grid.major.x = element_blank(),
+      panel.grid.minor.y = element_blank()) +             
+    scale_x_discrete(labels = label_mapping, limits = x_levels) +
+    scale_color_manual(values = color_values, labels = label_values) +
+    scale_linetype_manual(values = linetype_values, labels = label_values) +
+    scale_y_continuous(breaks = seq(0, 1, by = 0.1), limits = c(0, 1)) +
+    labs(x = "", y = "Item Response Probability", color = "", linetype = "")
+
+LCA_profile_plot
+
+# save plot
+ggsave(LCA_profile_plot, file = file.path(folder_plot, "LCA_profile_plot.png"), width = 11, height = 6, bg = "white")
+graph2doc(x = LCA_profile_plot, file=file.path(folder_plot, "LCA_profile_plot.png"), width=10.5, height=6)
+```
+
+# Profile Plot of best fitting LCA model (without covariates)
+```{r profile plot without covariates}
+# data preparation for plotting
+bestmodel_wo_cov <- lca_results_wo_cov_reordered
+
+lcaModelProbs_wo_cov <- reshape2::melt(bestmodel_wo_cov$probs, level = 1) %>%
+  rename(class = Var1) %>%
+  mutate(class = str_extract(class, "\\d+"),
+         class = factor(class, levels = class_levels))
+
+# add standard errors
+probs_se_melted_wo_cov <- melt(bestmodel_wo_cov$probs.se, level = 1) %>%
+  rename(value_se = value, class = Var1) %>%
+  dplyr::select(-Var2) %>%
+  mutate(value_se = round(value_se, digits = 10)) %>%
+  distinct() %>%
+  mutate(class = factor(class, levels = class_levels))
+
+# add confidence intervals
+lcaModelProbs_wo_cov <- left_join(lcaModelProbs_wo_cov, probs_se_melted_wo_cov, by = c("class", "L1")) %>%
+  mutate(CI_lower = pmax(value - 1.96 * value_se, 0), # CI cannot be negative
+         CI_upper = pmin(value + 1.96 * value_se, 1) # CI cannot be > 1
+  )
+
+#which variable manifestation probabilities to plot
+lcaModelProbs_wo_cov_plotting <- lcaModelProbs_wo_cov %>% filter(Var2 %in% c("high", "yes", "low risk perc"))
+
+# size of the classes in percent
+class_shares <- sprintf("%.1f%%", bestmodel_wo_cov$P * 100)
+label_values <- c(
+  "1" = paste("Class 1\n", "(", class_shares[1], ")", "\n", sep = ""),
+  "2" = paste("Class 2\n", "(", class_shares[2], ")", "\n", sep = ""),
+  "3" = paste("Class 3\n", "(", class_shares[3], ")", "\n", sep = "")
+)
+
+#generate plot
+LCA_profile_plot_wo_cov <- ggplot(lcaModelProbs_wo_cov_plotting, aes(x = L1, y = value, group = class, 
+                                                                    color = class, linetype = class)) +
+  geom_point() +
+  geom_line(linewidth=1) +
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), width = 0.2, alpha = 0.55, linewidth = 0.72, linetype = "solid") +
+  theme_minimal() +
+  theme(
+    axis.text.x = element_text(hjust = 0.5, vjust = 1, size = 12),
+    axis.text.y = element_text(size = 12),              
+    axis.title.x = element_text(size = 14),          
+    axis.title.y = element_text(size = 14),            
+    plot.title = element_text(hjust = 0.5, size = 16), 
+    legend.text = element_text(size = 12),             
+    legend.title = element_text(size = 14),
+    legend.position = "bottom",
+    panel.grid.major.x = element_blank(),
+    panel.grid.minor.y = element_blank()) +             
+  scale_x_discrete(labels = label_mapping, limits = x_levels) +
+  scale_color_manual(values = color_values, labels = label_values) +
+  scale_linetype_manual(values = linetype_values, labels = label_values) +
+  scale_y_continuous(breaks = seq(0, 1, by = 0.1), limits = c(0, 1)) +
+  labs(x = "", y = "Item Response Probability", color = "", linetype = "")
+
+LCA_profile_plot_wo_cov
+
+# save plot
+ggsave(LCA_profile_plot_wo_cov, file = file.path(folder_plot, "LCA_profile_plot_wo_cov.png"), width = 11, height = 6, bg = "white")
+graph2doc(x = LCA_profile_plot_wo_cov, file=file.path(folder_plot, "LCA_profile_plot_wo_cov.png"), width=10.5, height=6)
+
+```
+
+# Model Fit
+
+```{r check model fit}
+lca_fitmetric_allmodels <- lca_results$results %>%
+  gather(key = "Metric", value = "Value", -Model)
+
+ggplot(lca_fitmetric_allmodels, aes(x = Model, y = Value, color = Metric)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~ Metric, scales = "free_y") +
+  labs(title = "Model Fit", x = "Number of Classes", y = "Value", color = "Metric") +
+  theme_minimal()
+```
+
+
+# Diagnostic Criteria
+
+## (Relative) Entropy
+
+Relative entropy values above .8 indicate an acceptable classification of individuals into classes (Clark & Muthén, 2009). Values close to 1 are ideal.
+
+A too low entropy value might indicate that the model is overly simplified and does not adequately account for the variation in the data. However, a too high entropy value might also suggest that the model is too complex and possibly exhibits overfitting.
+
+```{r entropy_rel}
+entropy.R2 <- function(fit) {
+  entropy <- function(p) { # entropy for a probability vector
+    sum(-p * log(p)) #minus sign ensures that the entropy is positive (as log(p) is negative) 
+  }
+  error_prior <- entropy(fit$P) # entropy of  estimated class proportions
+  error_post <- mean(apply(fit$posterior, 1, entropy)) # calculate the entropy for each row (each observation), where each column represents a class. Then take the mean of these entropies.
+  R2_entropy <- (error_prior - error_post) / error_prior
+  cat("R2 Entropy: ", R2_entropy, "\n")
+  cat("Error Prior: ", error_prior, "\n")
+  cat("Error Posterior: ", error_post, "\n")
+}
+
+#entropy for best fitting model with covariates
+entropy.R2(bestmodel)
+
+#entropy for all models without covariates
+entropy_results <- lapply(lca_results_wo_cov$models[1:5], entropy.R2)
+```
+
+## Average posterior class membership probabilities
+
+- provide insights into how well the model assigns individuals to their most likely class
+- are provided for their most likely assigned class, with values > .70 indicating well-separated classes (Nagin, 2005).
+
+```{r posterior probabilities}
+
+calculate_classification_metrics <- function(model, num_classes) {
+  # Extract the posterior probabilities
+  class_probs <- data.frame(model$posterior)
+
+  # Calculate the maximum probability for each participant
+  class_probs$max_prob <- apply(class_probs, 1, max)
+
+  # Calculate average posterior probability
+  avg_posterior_prob <- mean(class_probs$max_prob)
+  cat("Average posterior probability: ", avg_posterior_prob, "\n")
+
+  # Create a dataframe with posterior probabilities and predicted classes
+  posteriors <- data.frame(model$posterior, model$predclass)
+
+  # Rename the predclass column
+  names(posteriors)[names(posteriors) == "model.predclass"] <- "predclass"
+
+  # Calculate the classification table by summing the probabilities
+  classification_table <- posteriors %>%
+    group_by(predclass) %>%
+    summarize(across(.cols = 1:num_classes, .fns = sum))
+
+  # Transform the counts to proportions
+  classification_table_prop <- classification_table %>%
+    mutate(across(.cols = 2:(num_classes + 1), .fns = function(x) x/sum(x)))
+
+  # Print the proportions table
+  print(classification_table_prop)
+
+  # Convert to matrix and calculate classification error
+  classification_values_only <- as.matrix(classification_table[2:(num_classes + 1)])
+  total_classification_error <- 1 - sum(diag(classification_values_only)) / sum(classification_values_only)
+
+  cat("Total classification error: ", total_classification_error, "\n")
+
+  # Return results as a list for potential further use
+  return(list(avg_posterior_prob = avg_posterior_prob,
+              classification_table = classification_table,
+              classification_table_prop = classification_table_prop,
+              total_classification_error = total_classification_error))
+}
+
+classification_metrics_wo_cov <- lapply(1:5, function(i) {
+  #print number of subjects in each class
+  print(table(lca_results_wo_cov$models[[i]]$predclass))
+  calculate_classification_metrics(lca_results_wo_cov$models[[i]], num_classes = i)
+})
+
+
+calculate_classification_metrics(bestmodel, 3)
+
+```
+
+# Does the covariate model have a significant improvement in likelihood over the no-covariate model? 
+
+```{r cov vs no cov}
+#values of model without covariates
+ll_wo_cov <- bestmodel_wo_cov$llik #log-likelihood
+param_wo_cov <- bestmodel_wo_cov$npar # number of parameters
+
+#values of model with covariates
+ll_with_cov <- bestmodel$llik #log-likelihood
+param_with_cov <- bestmodel$npar # number of parameters
+
+#perfrom likelihood ratio test
+G2 <- -2 * (ll_wo_cov - ll_with_cov) # G2 statistic (likelihood ratio test statistic)
+df <- param_with_cov - param_wo_cov  # degrees of freedom (i.e. number of additional parameters in the model with covariates)
+p_value <- pchisq(G2, df, lower.tail = FALSE)
+
+cat("Likelihood ratio test results:\n")
+cat("G2: ", G2, "\n")
+cat("Degrees of freedom: ", df, "\n")
+cat("p-value: ", p_value, "\n")
+
+# yes, model with covariates has a significant improvement in likelihood over the no-covariate model
+```
+
+# Latent Class Regression Coefficients
+
+```{r regression coefficients}
+coefficients <- bestmodel$coeff  # log odds
+se <- bestmodel$coeff.se         # standard errors
+
+odds_ratios <- exp(coefficients)
+
+#95% confidence intervals
+lower_ci <- exp(coefficients - 1.96 * se) 
+upper_ci <- exp(coefficients + 1.96 * se) 
+
+odds_ratios
+lower_ci
+upper_ci
+
+covariate_names <- rownames(coefficients)
+
+# generate data frame for plotting
+plot_data <- data.frame(
+  Covariate = rep(rownames(coefficients), times = ncol(coefficients)),
+  Class = rep(c("'DUIC-specific risk'-class (N = 151)", "'Global risk'-class (N = 129)"), each = nrow(coefficients)),
+  OddsRatio = as.vector(odds_ratios),
+  LowerCI = as.vector(lower_ci),
+  UpperCI = as.vector(upper_ci)
+)
+
+plot_data <- plot_data %>% filter(Covariate != "(Intercept)")
+
+# extra dataframe for headings
+grouping_rows <- data.frame(
+  Covariate = c("Gender (Reference: male)", "Agegroup (Reference: 18-24)", 
+                "Education (Reference: low)", "Urbanicity (Reference: rural)"),
+  Class = rep(c("'DUIC-specific risk'-class (N = 151)", "'Global risk'-class (N = 129)"), each = 2),
+  OddsRatio = rep(NA, 4), 
+  LowerCI = rep(NA, 4),  
+  UpperCI = rep(NA, 4)
+)
+
+# bind rows with headings to the data frame
+plot_data <- rbind(grouping_rows, plot_data)
+
+plot_data$Covariate <- factor(plot_data$Covariate,
+                              levels = c("sexweiblich", "Gender (Reference: male)", 
+                                         "agegroup45-64", "agegroup35-44", "agegroup25-34", 
+                                          "Agegroup (Reference: 18-24)", # heading for age groups
+                                         "edu_grouphigh", "edu_groupmid", 
+                                          "Education (Reference: low)",  # heading for education groups
+                                         "urb_lab_en_binurban", "Urbanicity (Reference: rural)"))  # heading for urbanicity groups
+
+# change label names
+plot_data$Covariate <- factor(plot_data$Covariate,
+                              labels = c("female", "Gender (Reference: male)", 
+                                 "45-64", "35-44", "25-34", "Agegroup (Reference: 18-24)",
+                                 "high", "medium", "Education (Reference: low)",
+                                 "urban", "Urbanicity (Reference: rural)")) 
+                              
+LCARegCoeff <- ggplot(plot_data, aes(x = Covariate, y = OddsRatio)) +
+  geom_point(aes(color = ifelse(OddsRatio > 1, "Above 1", "Below 1")), size = 2.5) +
+  geom_errorbar(aes(ymin = LowerCI, ymax = UpperCI, color = ifelse(OddsRatio > 1, "Above 1", "Below 1")), width = 0.2) +
+  geom_hline(yintercept = 1, linetype = "dashed") +
+  coord_flip(ylim = c(0.1, 6)) + 
+  facet_wrap(~ Class) +
+  scale_y_continuous(breaks = seq(0, 6, by = 1), labels = seq(0, 6, by = 1)) +
+  geom_label(data = plot_data %>% filter(LowerCI > 1 | UpperCI < 1), 
+            aes(label = paste0("OR = ", round(OddsRatio, 2)), vjust = -0.5, hjust = -0.2), 
+            color = "black", size = 5, label.size = 0.5, fill = "white", label.padding = unit(0.15, "lines")) +
+  theme_minimal(base_size = 20) +
+  labs(title = "Odds of Membership in a DUIC-risk-class", subtitle = "Reference: 'Low risk'-class (N = 267), total N = 547", x = "", y = "Odds Ratio") + 
+  scale_color_manual(values = c("Above 1" = "darkred", "Below 1" = "skyblue")) +
+  theme(legend.position = "none", 
+        panel.grid.major.y = element_blank(),
+        panel.grid.minor.y = element_blank(),
+        strip.text = element_text(face = "bold"),
+        panel.spacing = unit(0.8, "lines"),
+        plot.margin = margin(0.5, 0.5, 0.5, 0.5, "cm"),
+        axis.text.y = element_text(face = ifelse(levels(plot_data$Covariate) %in% c(
+          "Gender (Reference: male)", "Agegroup (Reference: 18-24)", 
+          "Education (Reference: low)", "Urbanicity (Reference: rural)"), "bold", "plain")))
+
+# save plot
+graph2doc(x = LCARegCoeff, file=file.path(folder_plot, "LCARegCoeff.png"), width=12, height=7)
+```
