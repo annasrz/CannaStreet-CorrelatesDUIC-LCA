@@ -1,11 +1,11 @@
 ---
 title: "Correlates of driving under the influence of cannabis"
 subtitle: "Latent Class Analysis"
-author: "Anna"
+author: "Anna Schranz"
 date: "2024-05-25"
 output: 
   html_document:
-    code_folding: hide
+    code_folding: show
 ---
 
 ```{r setup, include=FALSE}
@@ -49,8 +49,8 @@ if (!file.exists(folder_plot)) {
 # Data Import
 ```{r data_import}
 # define paths
-path_DE_reg <- file.path("..", "..", "Data", "regular_users_GER_cleaned_v03_20240731.rds") #at least monthly users in GER
-path_PLZ <- file.path("..", "..", "Data", "plz and urban.rds") #PLZ and urbanization level
+path_DE_reg <- file.path("..", "Data", "regular_users_GER_cleaned_v03_20240731.rds") #at least monthly users in GER
+path_PLZ <- file.path("..", "Data", "plz and urban.rds") #PLZ and urbanization level
 
 # read data
 data_raw <- data.table(readRDS(file = path_DE_reg))
@@ -60,7 +60,7 @@ data_PLZ <- data.table(readRDS(file = path_PLZ))
 
 # Data Preparation
 
-## Selection of Variables relevant for LCA
+## Selection of variables relevant for LCA
 ```{r select_vars}
 data_sel <- data_raw %>% 
   dplyr::select("i_NUMBER", "PLZ", "Bundesland", "agegroup", "age_in_years", "sex", "edu_group", "prescription", "CAST_score_full", "BSSS_total", "DISTRESS_total", "speeding_total", "DUIC.INTOX", "DUIA", "DUIC.PEERS", "LEGAL.01", "DUICDUIA.PERCRISK.1", "DUICDUIA.PERCRISK.2", "DUICDUIA.PERCRISK.3", "DUICDUIA.PERCRISK.4", "medic_withprescr_only", "DRIVERLICENSE")
@@ -71,7 +71,7 @@ data_sel <- data_sel %>% filter(DRIVERLICENSE == "ja") #only participants who ha
 
 ```
 
-## PLZ matchen, um Urbanisierungsgrad zu bestimmen
+## Match postcodes to official municipality code and RegioStaRGem5 classification to define urbanicity (urban vs. rural dwellers)
 ```{r match_plz}
 
 data_sel <- merge(data_sel, data_PLZ, by = "PLZ", all.x = TRUE)
@@ -88,7 +88,7 @@ data_sel <- data_sel %>% mutate(urb_lab_en = case_when(
     labels = c("rural", "urban")))
 ```
 
-### Distribution of Urbanization Level
+### Distribution of urbanicity
 ```{r urban_dist}
 prop.table(table(data_sel$urb_lab_en))
 table(data_sel$urb_lab_en)
@@ -97,9 +97,9 @@ table(data_sel$urb_lab_en)
 table(is.na(data_sel$urb_lab_en), data_sel$DUIC.INTOX) # 15 NAs (7 without DUIC, 8 with DUIC)
 ```
 
-## Tranformation of Variables into Binary Factors
+## Tranformation of variables into binary factors
 
-Variables should be binary factors with levels 1 and 2 for the LCA model.
+For this analysis, variables should be binary factors with levels 1 and 2.
 
 ```{r data_prep}
 data <- data_sel %>%
@@ -162,7 +162,7 @@ data <- data_sel %>%
     
 ```
 
-## MEDIAN SPLIT to dichotomize continuous variables
+## Median split to dichotomize continuous variables
 
 ### Brief Sensation Seeking Scale (BSSS)
 ```{r dichotomize_bsss}
@@ -179,8 +179,6 @@ data <- data %>%
     TRUE ~ NA_real_),
     levels = c(1, 2),
     labels = c("low", "high")))
-
-table(data$BSSS_binary)
 ```
 
 ### Speeding
@@ -198,15 +196,12 @@ data <- data %>%
     TRUE ~ NA_real_),
     levels = c(1, 2),
     labels = c("low", "high")))
-table(data$speeding_binary)
-table(data$speeding_total)
 ```
 
 
+## Description of the sample
 
-## Description of the Sample
-
-### Sociodemographic Variables (Covariates)
+### Sociodemographic variables (covariates)
 ```{r descriptives_demo}
 
 #randomly assign sex == "divers" to "male" or "female"
@@ -248,6 +243,8 @@ dist_CAST <- ggplot(data, aes(x = CAST_score_full, fill = CUD_CAST)) +
   scale_x_continuous(breaks = seq(0, 24, by = 2, limits = c(0, 24))) +
   theme_minimal()
 
+dist_CAST
+
 #PERCRISK_DUICmod_bin
 data <- data %>% mutate(DUICDUIA.PERCRISK.1 = factor(DUICDUIA.PERCRISK.1, levels = c("ungefährlich", "nicht so gefährlich", "gefährlich", "sehr gefährlich", "weiß nicht"), labels = c("not dangerous", "not so dangerous", "dangerous", "very dangerous", "don't know")))
 
@@ -257,6 +254,8 @@ dist_PercRiskDUIC <- ggplot(data, aes(x = DUICDUIA.PERCRISK.1, fill = PERCRISK_D
   scale_fill_discrete(labels = c("high risk perc" = "High", "low risk perc" = "Low")) +
   scale_x_discrete(labels = c("not dangerous" = "Not\ndangerous", "not so dangerous" = "Not so\ndangerous", "dangerous" = "Dangerous", "very dangerous" = "Very\ndangerous", "don't\nknow" = "Don't know")) +
   theme_minimal()
+
+dist_PercRiskDUIC
 
 #PERCRISK_DUIAmod_bin
 data <- data %>% mutate(DUICDUIA.PERCRISK.2 = factor(DUICDUIA.PERCRISK.2, levels = c("ungefährlich", "nicht so gefährlich", "gefährlich", "sehr gefährlich", "weiß nicht"), labels = c("not dangerous", "not so dangerous", "dangerous", "very dangerous", "don't know")))
@@ -268,6 +267,8 @@ dist_PercRiskDUIA <- ggplot(data, aes(x = DUICDUIA.PERCRISK.2, fill = PERCRISK_D
   scale_x_discrete(labels = c("not dangerous" = "Not\ndangerous", "not so dangerous" = "Not so\ndangerous", "dangerous" = "Dangerous", "very dangerous" = "Very\ndangerous", "don't\nknow" = "Don't know")) +
   theme_minimal()
 
+dist_PercRiskDUIA
+
 #BSSS
 dist_BSSS <- ggplot(data, aes(x = BSSS_total, fill = BSSS_binary)) +
   geom_histogram(bins = 20) +
@@ -275,6 +276,8 @@ dist_BSSS <- ggplot(data, aes(x = BSSS_total, fill = BSSS_binary)) +
   geom_vline(xintercept = median(data$BSSS_total), linetype = "dashed", color = "red", linewidth = 1) +
   labs(x = "Brief Sensation Seeking Scale - Score", y = "Count", fill = "Dichotomized\nSensation\nSeeking") +
   theme_minimal()
+
+dist_BSSS
 
 #speeding
 dist_speed <- ggplot(data, aes(x = speeding_total, fill = speeding_binary)) +
@@ -284,12 +287,19 @@ dist_speed <- ggplot(data, aes(x = speeding_total, fill = speeding_binary)) +
   labs(x = "Speeding Scale - Score", y = "Count", fill = "Dichotomized\nSpeeding") +
   theme_minimal()
 
+dist_speed
+
 #mental illness
 dist_mentalillness <- ggplot(data, aes(x = DISTRESS_total, fill = mental_illness)) +
   geom_histogram(bins = 20) +
   labs(x = "Kessler Psychological Distress Scale - Score", y = "Count", fill = "Mental Illness") +
   theme_minimal()
 
+dist_mentalillness
+```
+
+
+```{r save_plots, include=FALSE}
 #save plots with graph2doc
 graph2doc(x = dist_CAST, file = file.path(folder_plot, "dist_CAST.png"), width = 6, height = 4)
 graph2doc(x = dist_PercRiskDUIC, file = file.path(folder_plot, "dist_PercRiskDUIC.png"), width = 6, height = 4)
@@ -299,7 +309,7 @@ graph2doc(x = dist_speed, file = file.path(folder_plot, "dist_speed.png"), width
 graph2doc(x = dist_mentalillness, file = file.path(folder_plot, "dist_mentalillness.png"), width = 6, height = 4)
 ```
 
-# Correlations between Variables (Cramers V)
+# Correlations between variables (Cramers V)
 
 ```{r check correlations}
 
@@ -447,14 +457,14 @@ class_shares <- data.frame(
 )
 ```
 
-# Predicted Class Membership (by model posterior probabilities)
+# Predicted class membership (by model posterior probabilities)
 ```{r pred_class}
 table(bestmodel$predclass)
 prop.table(table(bestmodel$predclass))
 ```
 
 
-# Profile Plot of best fitting LCA model (with covariates)
+# Profile plot of best fitting LCA model (with covariates)
 ```{r profile plot}
 # constants
 class_levels <- c("1", "2", "3")
@@ -540,7 +550,7 @@ ggsave(LCA_profile_plot, file = file.path(folder_plot, "LCA_profile_plot.png"), 
 graph2doc(x = LCA_profile_plot, file=file.path(folder_plot, "LCA_profile_plot.png"), width=10.5, height=6)
 ```
 
-# Profile Plot of best fitting LCA model (without covariates)
+# Profile plot of best fitting LCA model (without covariates)
 ```{r profile plot without covariates}
 # data preparation for plotting
 bestmodel_wo_cov <- lca_results_wo_cov_reordered
